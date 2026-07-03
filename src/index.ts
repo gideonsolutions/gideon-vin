@@ -4,10 +4,15 @@
  *
  * It does three things:
  *   1. Flags an invalid VIN (bad format, or vPIC can't decode it) — always.
- *   2. Flags a vehicle that is unlikely to be a Form 2290 vehicle — passenger
- *      cars, SUVs/MPVs, motorcycles, light pickups/vans, trailers, etc. — using
- *      the decoded vehicle type, body class, and gross weight rating.
+ *   2. Rates how likely the vehicle is to be a Form 2290 vehicle:
+ *        • veryUnlikelyHvut (STRONG warning) — passenger cars, motorcycles,
+ *          SUVs/MPVs, vans, pickups, trailers, and other clearly-not-2290
+ *          vehicle types / body styles.
+ *        • unlikelyHvut (warning) — GVWR class 1–6 (up to 26,000 lb).
+ *        (class 7 and 8 / heavy trucks are treated as fine.)
  *   3. Returns the vehicle's make, model (and year, type, body class).
+ *
+ * It never hard-blocks — it only flags. Callers decide what to do.
  *
  * Released by Gideon Solutions, LLC under the Gideon Christian Open Source
  * License, Version 1.0 (see LICENSE.md).
@@ -21,55 +26,59 @@ const VPIC_BASE = "https://vpic.nhtsa.dot.gov/api/vehicles";
 const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
 
 /**
- * GVWR lower bound (lb) below which a vehicle is treated as too light to be a
- * Heavy Highway Vehicle Use Tax vehicle. 26,000 lb is the top of Class 6; a real
- * Form 2290 truck is Class 7–8, so a lighter rating means a car, van, or
- * light/medium pickup rather than a heavy highway vehicle.
+ * vPIC `VehicleType` values that are never Form 2290 vehicles — a STRONG signal
+ * regardless of weight. (Vans and pickups usually decode as "TRUCK"; they're
+ * caught by the body-class and GVWR-class checks instead.)
  */
-export const DEFAULT_LOW_WEIGHT_THRESHOLD_LB = 26_000;
-
-/**
- * vPIC `VehicleType` values that are never Form 2290 vehicles regardless of
- * weight. (Light pickups/vans decode as "TRUCK" and are caught by the GVWR
- * check instead.)
- */
-const UNLIKELY_VEHICLE_TYPES = new Set([
+const VERY_UNLIKELY_TYPES = new Set([
   "PASSENGER CAR",
   "MULTIPURPOSE PASSENGER VEHICLE (MPV)",
   "MOTORCYCLE",
   "LOW SPEED VEHICLE (LSV)",
+  "OFF ROAD VEHICLE",
   "TRAILER",
 ]);
+
+/** Light-duty body styles (vPIC `BodyClass`) — a STRONG signal (cars, SUVs,
+ *  vans, pickups) even when the vehicle type decodes as "TRUCK". */
+const LIGHT_BODY_RE =
+  /pickup|\bvan\b|minivan|sport utility|\bsuv\b|\bcuv\b|crossover|sedan|saloon|coupe|hatchback|wagon|convertible|roadster|\bmpv\b/i;
 
 /** True when `vin` is 17 valid VIN characters (does not check the check digit). */
 export function isValidVinFormat(vin: string): boolean {
   return VIN_RE.test(vin.trim().toUpperCase());
 }
 
-/**
- * Parse the lower-bound weight in pounds from a vPIC GVWR class string.
- * The lower bound is the first number after the "Class X:" label:
- *   "Class 8: 33,001 lb and above (...)"      → 33001
- *   "Class 2E: 6,001 - 7,000 lb (...)"         → 6001
- *   "Class 1: 6,000 lb or less"                → 6000
- */
+/** Parse the GVWR class number (1–8) from a vPIC GVWR string, e.g.
+ *  "Class 7: 26,001 - 33,000 lb" → 7, "Class 2E: 6,001 - 7,000 lb" → 2. */
+export function parseGvwrClass(gvwr: string | null | undefined): number | undefined {
+  if (!gvwr) return undefined;
+  const m = gvwr.match(/class\s+(\d+)/i);
+  return m && m[1] ? Number(m[1]) : undefined;
+}
+
+/** Parse the lower-bound weight in pounds from a vPIC GVWR class string, e.g.
+ *  "Class 8: 33,001 lb and above" → 33001, "Class 2E: 6,001 - 7,000 lb" → 6001. */
 export function parseGvwrLowerLb(gvwr: string | null | undefined): number | undefined {
   if (!gvwr) return undefined;
   const afterLabel = gvwr.includes(":") ? gvwr.slice(gvwr.indexOf(":") + 1) : gvwr;
-  const m = afterLabel.replace(/,/g, "").match(/\d{3,}/); // first 3+ digit number (skips the class digit)
+  const m = afterLabel.replace(/,/g, "").match(/\d{3,}/);
   return m ? Number(m[0]) : undefined;
 }
 
 export interface VinFlags {
   /** The VIN format is invalid, or vPIC could not decode it. Always evaluated. */
   invalid: boolean;
-  /** The vehicle is unlikely to be a Form 2290 vehicle (car, SUV/MPV, motorcycle,
-   *  light pickup/van, trailer, or a low gross weight rating). */
+  /** STRONG warning: a vehicle type / body style that is never a Form 2290
+   *  vehicle — passenger car, SUV/MPV, motorcycle, van, pickup, or trailer. */
+  veryUnlikelyHvut: boolean;
+  /** Warning: a GVWR class 1–6 vehicle (up to 26,000 lb) — too light for 2290. */
   unlikelyHvut: boolean;
-  /** True if any flag above is set — surface a warning to the filer. */
+  /** True if any flag above is set — surface a warning to the filer (never block). */
   suspicious: boolean;
   /** Machine-readable reasons, e.g. "invalid-format", "vpic-error:1",
-   *  "unlikely-type:PASSENGER CAR", "low-gvwr:6001lb<26000lb". */
+   *  "very-unlikely-type:PASSENGER CAR", "very-unlikely-body:Pickup",
+   *  "gvwr-class-1-6:3". */
   reasons: string[];
 }
 
@@ -86,6 +95,8 @@ export interface VinResult {
   bodyClass?: string;
   /** Raw vPIC GVWR class string. */
   gvwr?: string;
+  /** GVWR class number 1–8, parsed from `gvwr`. */
+  gvwrClass?: number;
   /** Lower bound of the GVWR range in pounds, parsed from `gvwr`. */
   gvwrLbLower?: number;
   flags: VinFlags;
@@ -94,8 +105,6 @@ export interface VinResult {
 }
 
 export interface VerifyVinOptions {
-  /** GVWR lower bound (lb) under which the vehicle is flagged. Default 26,000. */
-  lowWeightThresholdLb?: number;
   /** Override the fetch implementation (testing, or runtimes without global fetch). */
   fetchImpl?: typeof fetch;
   /** Request timeout in milliseconds. Default 10,000. */
@@ -110,7 +119,13 @@ function baseResult(vin: string): VinResult {
     valid: false,
     errorCode: "",
     errorText: "",
-    flags: { invalid: true, unlikelyHvut: false, suspicious: true, reasons: [] },
+    flags: {
+      invalid: true,
+      veryUnlikelyHvut: false,
+      unlikelyHvut: false,
+      suspicious: true,
+      reasons: [],
+    },
     raw: {},
   };
 }
@@ -126,7 +141,6 @@ export async function verifyVin(
   opts: VerifyVinOptions = {},
 ): Promise<VinResult> {
   const cleaned = vin.trim().toUpperCase();
-  const threshold = opts.lowWeightThresholdLb ?? DEFAULT_LOW_WEIGHT_THRESHOLD_LB;
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
   if (typeof doFetch !== "function") {
     throw new Error(
@@ -183,28 +197,45 @@ export async function verifyVin(
   const vehicleType = (r.VehicleType ?? "").trim() || undefined;
   const bodyClass = (r.BodyClass ?? "").trim() || undefined;
   const gvwr = (r.GVWR ?? "").trim() || undefined;
+  const gvwrClass = parseGvwrClass(gvwr);
   const gvwrLbLower = parseGvwrLowerLb(gvwr);
 
   const flags: VinFlags = {
     invalid: !clean,
+    veryUnlikelyHvut: false,
     unlikelyHvut: false,
     suspicious: false,
     reasons: [],
   };
   if (!clean) flags.reasons.push(`vpic-error:${errorCode || "unknown"}`);
 
-  // (2) Unlikely-2290 detection (only meaningful when the VIN decoded).
+  // (2) Likelihood rating — only meaningful when the VIN decoded.
   if (clean) {
-    if (vehicleType && UNLIKELY_VEHICLE_TYPES.has(vehicleType.toUpperCase())) {
-      flags.unlikelyHvut = true;
-      flags.reasons.push(`unlikely-type:${vehicleType}`);
+    const reasons: string[] = [];
+    // STRONG: vehicle types / body styles that are never 2290 vehicles.
+    let strong = false;
+    if (vehicleType && VERY_UNLIKELY_TYPES.has(vehicleType.toUpperCase())) {
+      strong = true;
+      reasons.push(`very-unlikely-type:${vehicleType}`);
     }
-    if (gvwrLbLower != null && gvwrLbLower < threshold) {
-      flags.unlikelyHvut = true;
-      flags.reasons.push(`low-gvwr:${gvwrLbLower}lb<${threshold}lb`);
+    if (bodyClass && LIGHT_BODY_RE.test(bodyClass)) {
+      strong = true;
+      reasons.push(`very-unlikely-body:${bodyClass}`);
     }
+    // Warn on GVWR class 1–6 (up to 26,000 lb). Class 7 and 8 are fine.
+    const cls =
+      gvwrClass ?? (gvwrLbLower != null && gvwrLbLower <= 26_000 ? 6 : undefined);
+    const classIs1to6 = cls != null && cls <= 6;
+    if (classIs1to6) {
+      reasons.push(`gvwr-class-1-6:${gvwrClass ?? `~${gvwrLbLower}lb`}`);
+    }
+
+    flags.veryUnlikelyHvut = strong;
+    flags.unlikelyHvut = !strong && classIs1to6;
+    flags.reasons.push(...reasons);
   }
-  flags.suspicious = flags.invalid || flags.unlikelyHvut;
+
+  flags.suspicious = flags.invalid || flags.veryUnlikelyHvut || flags.unlikelyHvut;
 
   return {
     vin: cleaned,
@@ -218,6 +249,7 @@ export async function verifyVin(
     vehicleType,
     bodyClass,
     gvwr,
+    gvwrClass,
     gvwrLbLower,
     flags,
     raw: r,

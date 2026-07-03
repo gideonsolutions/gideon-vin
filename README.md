@@ -1,8 +1,16 @@
 # gideon-vin
 
-Verify and decode US vehicle VINs via the public [NHTSA vPIC API](https://vpic.nhtsa.dot.gov/api/), with a heavy‑vehicle (HVUT / IRS **Form 2290**) "weight looks unusually low" flag.
+Verify and decode US vehicle VINs via the public [NHTSA vPIC API](https://vpic.nhtsa.dot.gov/api/), for IRS **Form 2290** (Heavy Highway Vehicle Use Tax) VIN detection.
 
-Zero dependencies. Uses the global `fetch` (Node 18+, browsers, edge runtimes).
+Zero dependencies. Uses the global `fetch` (Node 18+, browsers, edge runtimes). It **only flags — it never hard-blocks.**
+
+It does three things:
+
+1. **Flags invalid VINs** (bad format, or vPIC can't decode) — always.
+2. **Rates how likely the vehicle is to be a Form 2290 vehicle:**
+   - **`veryUnlikelyHvut`** (strong warning) — passenger cars, motorcycles, SUVs/MPVs, vans, pickups, trailers, and other clearly-not-2290 vehicle types/body styles.
+   - **`unlikelyHvut`** (warning) — **GVWR class 1–6** (up to 26,000 lb). (Class 7 and 8 / heavy trucks are treated as fine.)
+3. **Returns make and model** (plus year, type, body class).
 
 ## Install
 
@@ -12,50 +20,39 @@ npm install gideonsolutions/gideon-vin
 
 ## Usage
 
-It does three things for **Form 2290** VIN detection:
-
-1. **Flags invalid VINs** (bad format, or vPIC can't decode) — always.
-2. **Flags vehicles unlikely to be a 2290 vehicle** — passenger cars, SUVs/MPVs,
-   motorcycles, light pickups/vans, trailers — by vehicle type, body class, and
-   gross weight rating.
-3. **Returns make and model** (plus year, type, body class).
-
 ```ts
 import { verifyVin } from "gideon-vin";
 
 const res = await verifyVin("1FUJA6CK77LY00000");
 
-res.valid;             // true when vPIC decoded the VIN cleanly (ErrorCode "0")
-res.make;              // e.g. "FREIGHTLINER"
-res.model;             // e.g. "Cascadia"
-res.vehicleType;       // e.g. "TRUCK"
-res.gvwr;              // e.g. "Class 8: 33,001 lb and above (14,969 kg and above)"
-res.gvwrLbLower;       // 33001
-res.flags.invalid;     // bad format, or vPIC couldn't decode it
-res.flags.unlikelyHvut;// not a likely Form 2290 vehicle (car/SUV/moto/light truck)
-res.flags.suspicious;  // invalid || unlikelyHvut
-res.flags.reasons;     // ["unlikely-type:PASSENGER CAR", "low-gvwr:5001lb<26000lb"]
+res.valid;                // vPIC decoded the VIN cleanly (ErrorCode "0")
+res.make;                 // "FREIGHTLINER"
+res.model;                // "Cascadia"
+res.vehicleType;          // "TRUCK"
+res.gvwrClass;            // 8
+res.flags.invalid;        // bad format, or vPIC couldn't decode it
+res.flags.veryUnlikelyHvut; // STRONG: car/SUV/moto/van/pickup/trailer type or body
+res.flags.unlikelyHvut;   // warn: GVWR class 1–6
+res.flags.suspicious;     // invalid || veryUnlikelyHvut || unlikelyHvut
+res.flags.reasons;        // ["very-unlikely-type:PASSENGER CAR", "gvwr-class-1-6:3"]
 ```
 
 `verifyVin` never throws on network/HTTP errors — it returns a result with
 `flags.invalid = true` and a reason, so you can show a soft warning without
 breaking a filing flow.
 
-### How "unlikely to be a 2290 vehicle" is decided
+### How the rating is decided
 
-A real Form 2290 truck is a heavy highway vehicle (Class 7–8). A result is
-flagged `unlikelyHvut` when either:
+A vehicle is flagged **`veryUnlikelyHvut`** (show a strong warning) when the
+decoded **vehicle type** is a passenger car, MPV/SUV, motorcycle, low-speed
+vehicle, or trailer, or the **body class** is a light-duty style (pickup, van,
+SUV, sedan, coupe, hatchback, wagon, …).
 
-- the decoded **vehicle type** is a passenger car, MPV/SUV, motorcycle, low-speed
-  vehicle, or trailer; or
-- the **GVWR** lower bound is below the threshold (default **26,000 lb**, the top
-  of Class 6) — this catches light pickups and vans that decode as `TRUCK`.
+It's flagged **`unlikelyHvut`** (warning) when the **GVWR class is 1–6** (up to
+26,000 lb). Class 7 (26,001–33,000 lb), class 8, and heavy truck-tractors pass
+clean.
 
-Tune the weight threshold:
-
-```ts
-await verifyVin(vin, { lowWeightThresholdLb: 33000 });
-```
+Whatever the flags, `verifyVin` never blocks — the caller decides.
 
 ### Bulk
 
@@ -67,8 +64,9 @@ const results = await verifyVins(vins, { concurrency: 4 });
 ### Helpers
 
 ```ts
-import { isValidVinFormat, parseGvwrLowerLb } from "gideon-vin";
-isValidVinFormat("1FUJA6CK77LY00000"); // true
+import { isValidVinFormat, parseGvwrClass, parseGvwrLowerLb } from "gideon-vin";
+isValidVinFormat("1FUJA6CK77LY00000");           // true
+parseGvwrClass("Class 7: 26,001 - 33,000 lb");   // 7
 parseGvwrLowerLb("Class 8: 33,001 lb and above"); // 33001
 ```
 
