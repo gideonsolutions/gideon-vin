@@ -1,0 +1,44 @@
+{
+  "name": "gideon-vin",
+  "version": "0.1.0",
+  "description": "Verify and decode US vehicle VINs via the NHTSA vPIC API, with heavy-vehicle (HVUT / IRS Form 2290) low-weight flagging.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "Gideon Solutions, LLC",
+  "homepage": "https://github.com/gideonsolutions/gideon-vin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gideonsolutions/gideon-vin.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "LICENSE.md", "README.md"],
+  "engines": { "node": ">=18" },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test \"test/**/*.test.mjs\""
+  },
+  "keywords": [
+    "vin",
+    "nhtsa",
+    "vpic",
+    "hvut",
+    "form-2290",
+    "vehicle",
+    "truck",
+    "decode"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
